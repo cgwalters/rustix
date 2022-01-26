@@ -207,7 +207,8 @@ fn is_mountpoint(file: BorrowedFd<'_>) -> bool {
     }
 }
 
-/// Open a directory in `/proc`, mapping all errors to `io::Error::NOTSUP`.
+/// Open a directory in `/proc`, verifying that it is indeed a procfs filesystem.
+/// All errors are mapped to `io::Error::NOTSUP`.
 fn proc_opendirat<P: crate::path::Arg, Fd: AsFd>(dirfd: &Fd, path: P) -> io::Result<OwnedFd> {
     let oflags = OFlags::NOFOLLOW
         | OFlags::PATH
@@ -215,7 +216,29 @@ fn proc_opendirat<P: crate::path::Arg, Fd: AsFd>(dirfd: &Fd, path: P) -> io::Res
         | OFlags::CLOEXEC
         | OFlags::NOCTTY
         | OFlags::NOATIME;
-    openat(dirfd, path, oflags, Mode::empty()).map_err(|_err| io::Error::NOTSUP)
+    let fd = openat(dirfd, path, oflags, Mode::empty()).map_err(|_err| io::Error::NOTSUP)?;
+    check_procfs(fd.as_fd())?;
+    Ok(fd)
+}
+
+/// Wrapper for [`proc_opendirat`] that also returns its file metadata.
+fn proc_opendirat_and_stat<P: crate::path::Arg, Fd: AsFd>(
+    dirfd: &Fd,
+    path: P,
+) -> io::Result<(OwnedFd, Stat)> {
+    let fd = proc_opendirat(dirfd, path)?;
+    let stat = fstat(&fd).map_err(|_err| io::Error::NOTSUP)?;
+    Ok((fd, stat))
+}
+
+/// Open a directory in `/proc`, verifying that it is indeed a procfs filesystem.
+/// All errors are mapped to `io::Error::NOTSUP`.
+fn proc_open_file_at<P: crate::path::Arg, Fd: AsFd>(dirfd: &Fd, path: P) -> io::Result<OwnedFd> {
+    let oflags =
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NOCTTY | OFlags::NOATIME;
+    let file = openat(dirfd, path, oflags, Mode::empty()).map_err(|_err| io::Error::NOTSUP)?;
+    check_procfs(file.as_fd())?;
+    Ok(file)
 }
 
 /// Returns a handle to Linux's `/proc` directory.
@@ -235,16 +258,7 @@ fn proc() -> io::Result<(BorrowedFd<'static>, &'static Stat)> {
     // has no side effects.
     PROC.get_or_try_init(|| {
         // Open "/proc".
-        let proc = proc_opendirat(&cwd(), zstr!("/proc"))?;
-        let proc_stat = check_proc_entry(
-            Kind::Proc,
-            proc.as_fd(),
-            None,
-            Uid::ROOT.as_raw(),
-            Gid::ROOT.as_raw(),
-        )
-        .map_err(|_err| io::Error::NOTSUP)?;
-
+        let (proc, proc_stat) = proc_opendirat_and_stat(&cwd(), zstr!("/proc"))?;
         Ok(new_static_fd(proc, proc_stat))
     })
     .map(|(fd, stat)| (fd.as_fd(), stat))
@@ -265,22 +279,13 @@ fn proc_self() -> io::Result<(BorrowedFd<'static>, &'static Stat)> {
     // The init function here may run multiple times; see above.
     PROC_SELF
         .get_or_try_init(|| {
-            let (proc, proc_stat) = proc()?;
+            let proc = proc_self_fd()?;
 
-            let (uid, gid, pid) = (getuid(), getgid(), getpid());
-
+            let pid = getpid();
             // Open "/proc/self". Use our pid to compute the name rather than literally
             // using "self", as "self" is a symlink.
-            let proc_self = proc_opendirat(&proc, DecInt::new(pid.as_raw_nonzero().get()))?;
-            let proc_self_stat = check_proc_entry(
-                Kind::Pid,
-                proc_self.as_fd(),
-                Some(proc_stat),
-                uid.as_raw(),
-                gid.as_raw(),
-            )
-            .map_err(|_err| io::Error::NOTSUP)?;
-
+            let (proc_self, proc_self_stat) =
+                proc_opendirat_and_stat(&proc, DecInt::new(pid.as_raw_nonzero().get()))?;
             Ok(new_static_fd(proc_self, proc_self_stat))
         })
         .map(|(owned, stat)| (owned.as_fd(), stat))
@@ -301,21 +306,11 @@ pub fn proc_self_fd() -> io::Result<BorrowedFd<'static>> {
     // The init function here may run multiple times; see above.
     PROC_SELF_FD
         .get_or_try_init(|| {
-            let (_, proc_stat) = proc()?;
-
             let (proc_self, proc_self_stat) = proc_self()?;
 
             // Open "/proc/self/fd".
-            let proc_self_fd = proc_opendirat(&proc_self, zstr!("fd"))?;
-            let proc_self_fd_stat = check_proc_entry(
-                Kind::Fd,
-                proc_self_fd.as_fd(),
-                Some(proc_stat),
-                proc_self_stat.st_uid,
-                proc_self_stat.st_gid,
-            )
-            .map_err(|_err| io::Error::NOTSUP)?;
-
+            let (proc_self_fd, proc_self_fd_stat) =
+                proc_opendirat_and_stat(&proc_self, zstr!("fd"))?;
             Ok(new_static_fd(proc_self_fd, proc_self_fd_stat))
         })
         .map(|(owned, _stat)| owned.as_fd())
@@ -343,21 +338,11 @@ fn proc_self_fdinfo() -> io::Result<(BorrowedFd<'static>, &'static Stat)> {
 
     PROC_SELF_FDINFO
         .get_or_try_init(|| {
-            let (_, proc_stat) = proc()?;
-
             let (proc_self, proc_self_stat) = proc_self()?;
 
             // Open "/proc/self/fdinfo".
-            let proc_self_fdinfo = proc_opendirat(&proc_self, zstr!("fdinfo"))?;
-            let proc_self_fdinfo_stat = check_proc_entry(
-                Kind::Fd,
-                proc_self_fdinfo.as_fd(),
-                Some(proc_stat),
-                proc_self_stat.st_uid,
-                proc_self_stat.st_gid,
-            )
-            .map_err(|_err| io::Error::NOTSUP)?;
-
+            let (proc_self_fdinfo, proc_self_fdinfo_stat) =
+                proc_opendirat_and_stat(&proc_self, zstr!("fdinfo"))?;
             Ok((proc_self_fdinfo, proc_self_fdinfo_stat))
         })
         .map(|(owned, stat)| (owned.as_fd(), stat))
@@ -379,9 +364,9 @@ pub fn proc_self_fdinfo_fd<Fd: AsFd>(fd: &Fd) -> io::Result<OwnedFd> {
 }
 
 fn _proc_self_fdinfo(fd: BorrowedFd<'_>) -> io::Result<OwnedFd> {
-    let (proc_self_fdinfo, proc_self_fdinfo_stat) = proc_self_fdinfo()?;
+    let proc_self_fdinfo = proc_self_fdinfo_fd()?;
     let fd_str = DecInt::from_fd(&fd);
-    open_and_check_file(proc_self_fdinfo, proc_self_fdinfo_stat, fd_str.as_z_str())
+    proc_open_file_at(&proc_self_fdinfo, fd_str.as_z_str())
 }
 
 /// Returns a handle to a Linux `/proc/self/pagemap` file.
