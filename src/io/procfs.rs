@@ -51,6 +51,7 @@ fn check_proc_entry(
     uid: RawUid,
     gid: RawGid,
 ) -> io::Result<Stat> {
+    dbg!(&kind);
     let entry_stat = fstat(&entry)?;
     check_proc_entry_with_stat(kind, entry, entry_stat, proc_stat, uid, gid)
 }
@@ -78,6 +79,7 @@ fn check_proc_entry_with_stat(
     // may be mapped to another uid like `nobody`.
     if !matches!(kind, Kind::Proc) {
         if (entry_stat.st_uid, entry_stat.st_gid) != (uid, gid) {
+            dbg!(entry_stat.st_uid, entry_stat.st_gid, uid, gid);
             return Err(io::Error::NOTSUP);
         }
     }
@@ -87,6 +89,7 @@ fn check_proc_entry_with_stat(
     // not more.
     let expected_mode = if let Kind::Fd = kind { 0o500 } else { 0o555 };
     if entry_stat.st_mode & 0o777 & !expected_mode != 0 {
+        dbg!(entry_stat.st_mode);
         return Err(io::Error::NOTSUP);
     }
 
@@ -95,12 +98,14 @@ fn check_proc_entry_with_stat(
             // Check that the "/proc/self/fd" directory doesn't have any extraneous
             // links into it (which might include unexpected subdirectories).
             if entry_stat.st_nlink != 2 {
+                dbg!(entry_stat.st_nlink);
                 return Err(io::Error::NOTSUP);
             }
         }
         Kind::Pid | Kind::Proc => {
             // Check that the "/proc" and "/proc/self" directories aren't empty.
             if entry_stat.st_nlink <= 2 {
+                dbg!(entry_stat.st_nlink);
                 return Err(io::Error::NOTSUP);
             }
         }
@@ -108,6 +113,7 @@ fn check_proc_entry_with_stat(
             // Check that files in procfs don't have extraneous hard links to
             // them (which might indicate hard links to other things).
             if entry_stat.st_nlink != 1 {
+                dbg!(entry_stat.st_nlink);
                 return Err(io::Error::NOTSUP);
             }
         }
@@ -123,17 +129,20 @@ fn check_proc_root(entry: BorrowedFd<'_>, stat: &Stat) -> io::Result<()> {
 
     // Check the root inode number.
     if stat.st_ino != PROC_ROOT_INO {
+        dbg!(stat.st_ino);
         return Err(io::Error::NOTSUP);
     }
 
     // Proc is a non-device filesystem, so check for major number 0.
     // <https://www.kernel.org/doc/Documentation/admin-guide/devices.txt>
     if major(stat.st_dev) != 0 {
+        dbg!(stat.st_dev);
         return Err(io::Error::NOTSUP);
     }
 
     // Check that "/proc" is a mountpoint.
     if !is_mountpoint(entry) {
+        dbg!("not mountpoint");
         return Err(io::Error::NOTSUP);
     }
 
@@ -153,6 +162,7 @@ fn check_proc_subdir(
 
     // Check that subdirectories of "/proc" are not mount points.
     if is_mountpoint(entry) {
+        dbg!("is a mountpoint");
         return Err(io::Error::NOTSUP);
     }
 
@@ -162,6 +172,7 @@ fn check_proc_subdir(
 fn check_proc_file(stat: &Stat, proc_stat: Option<&Stat>) -> io::Result<()> {
     // Check that we have a regular file.
     if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
+        dbg!("not a regfile");
         return Err(io::Error::NOTSUP);
     }
 
@@ -173,11 +184,13 @@ fn check_proc_file(stat: &Stat, proc_stat: Option<&Stat>) -> io::Result<()> {
 fn check_proc_nonroot(stat: &Stat, proc_stat: Option<&Stat>) -> io::Result<()> {
     // Check that we haven't been linked back to the root of "/proc".
     if stat.st_ino == PROC_ROOT_INO {
+        dbg!(stat.st_ino);
         return Err(io::Error::NOTSUP);
     }
 
     // Check that we're still in procfs.
     if stat.st_dev != proc_stat.unwrap().st_dev {
+        dbg!(stat.st_dev);
         return Err(io::Error::NOTSUP);
     }
 
@@ -189,6 +202,7 @@ fn check_procfs(file: BorrowedFd<'_>) -> io::Result<()> {
     let statfs = fstatfs(&file)?;
     let f_type = statfs.f_type;
     if f_type != PROC_SUPER_MAGIC {
+        dbg!(f_type);
         return Err(io::Error::NOTSUP);
     }
 
@@ -297,6 +311,7 @@ pub fn proc_self_fd() -> io::Result<BorrowedFd<'static>> {
     // The init function here may run multiple times; see above.
     PROC_SELF_FD
         .get_or_try_init(|| {
+            dbg!("init proc");
             let (_, proc_stat) = proc()?;
 
             let (proc_self, proc_self_stat) = proc_self()?;
@@ -433,6 +448,7 @@ fn open_and_check_file(dir: BorrowedFd, dir_stat: &Stat, name: &ZStr) -> io::Res
     // Confirm that we got the same inode.
     let dot_stat = fstat(&dot).map_err(|_err| io::Error::NOTSUP)?;
     if (dot_stat.st_dev, dot_stat.st_ino) != (dir_stat.st_dev, dir_stat.st_ino) {
+        dbg!(dot_stat);
         return Err(io::Error::NOTSUP);
     }
 
